@@ -1,0 +1,145 @@
+name: Build SQLCipher PHP 8.2 TS x64 Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      sqlcipher_tag:
+        description: 'SQLCipher release tag'
+        required: true
+        default: 'v4.5.7'
+
+env:
+  PHP_VERSION: '8.2.12'
+  PHP_BRANCH: 'PHP-8.2'
+
+jobs:
+  build:
+    runs-on: windows-2019
+
+    steps:
+
+    # ── 1. Setup MSVC 2019 x64 ────────────────────────────────────────────────
+    - name: Setup MSVC 2019 x64
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+        vsversion: '2019'
+
+    # ── 2. PHP SDK binary tools ───────────────────────────────────────────────
+    - name: Clone PHP SDK binary tools
+      run: |
+        git clone --depth 1 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
+        Write-Host "PHP SDK cloned."
+
+    # ── 3. PHP 8.2.12 source ─────────────────────────────────────────────────
+    - name: Download PHP 8.2.12 source
+      run: |
+        $url = "https://github.com/php/php-src/archive/refs/tags/php-$env:PHP_VERSION.zip"
+        Write-Host "Downloading PHP source from $url"
+        Invoke-WebRequest $url -OutFile php-src.zip -UseBasicParsing
+        Expand-Archive php-src.zip -DestinationPath C:\
+        Rename-Item "C:\php-src-php-$env:PHP_VERSION" "C:\php-src"
+        Write-Host "PHP source ready at C:\php-src"
+
+    # ── 4. PHP Windows dependencies (includes OpenSSL) ────────────────────────
+    - name: Download PHP Windows dependencies
+      shell: cmd
+      run: |
+        cd /d C:\php-sdk
+        phpsdk_deps.bat --update --branch PHP-8.2 --vs 16 --arch x64 --dest C:\php-deps
+        echo PHP deps downloaded.
+
+    # ── 5. SQLCipher source ───────────────────────────────────────────────────
+    - name: Clone SQLCipher
+      run: |
+        $tag = "${{ github.event.inputs.sqlcipher_tag }}"
+        Write-Host "Cloning SQLCipher $tag"
+        git clone --depth 1 --branch $tag https://github.com/sqlcipher/sqlcipher.git C:\sqlcipher
+        Write-Host "SQLCipher cloned."
+
+    # ── 6. Integrate SQLCipher into pdo_sqlite ────────────────────────────────
+    - name: Replace SQLite3 amalgamation with SQLCipher
+      run: |
+        Write-Host "Replacing sqlite3.c and sqlite3.h with SQLCipher versions..."
+        Copy-Item C:\sqlcipher\sqlite3.c "C:\php-src\ext\pdo_sqlite\sqlite3.c" -Force
+        Copy-Item C:\sqlcipher\sqlite3.h "C:\php-src\ext\pdo_sqlite\sqlite3.h" -Force
+        Write-Host "Replacement done."
+
+    # ── 7. Build ─────────────────────────────────────────────────────────────
+    - name: Build php_pdo_sqlite against SQLCipher
+      shell: cmd
+      run: |
+        set DEPS=C:\php-deps
+        set OPENSSL_INC=%DEPS%\include
+        set OPENSSL_LIB=%DEPS%\lib
+
+        cd /d C:\php-src
+
+        call buildconf.bat --force
+        if errorlevel 1 (echo buildconf failed & exit /b 1)
+
+        call configure.bat ^
+          --disable-all ^
+          --enable-cli ^
+          --with-pdo-sqlite=shared ^
+          --with-prefix=C:\php-out ^
+          CFLAGS="/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE /DSQLITE_SOUNDEX /I%OPENSSL_INC%" ^
+          LDFLAGS="/LIBPATH:%OPENSSL_LIB%" ^
+          LIBS="libcrypto.lib user32.lib gdi32.lib advapi32.lib"
+        if errorlevel 1 (echo configure failed & exit /b 1)
+
+        nmake php_pdo_sqlite
+        if errorlevel 1 (echo nmake failed & exit /b 1)
+
+        echo Build succeeded.
+
+    # ── 8. Collect outputs ────────────────────────────────────────────────────
+    - name: Collect build artifacts
+      run: |
+        New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+
+        $releaseDirs = @(
+          "C:\php-src\Release_TS",
+          "C:\php-src\x64\Release_TS"
+        )
+
+        $found = $false
+        foreach ($dir in $releaseDirs) {
+          if (Test-Path "$dir\php_pdo_sqlite.dll") {
+            Copy-Item "$dir\php_pdo_sqlite.dll" artifacts\php_pdo_sqlcipher.dll
+            Write-Host "Found DLL in $dir"
+            $found = $true
+            if (Test-Path "$dir\php_pdo_sqlite.pdb") {
+              Copy-Item "$dir\php_pdo_sqlite.pdb" artifacts\php_pdo_sqlcipher.pdb
+            }
+            break
+          }
+        }
+
+        if (-not $found) {
+          Write-Host "DLL not found - listing Release_TS contents for debugging:"
+          Get-ChildItem "C:\php-src" -Recurse -Filter "*.dll" | Select-Object FullName
+          exit 1
+        }
+
+        Write-Host "Artifact contents:"
+        Get-ChildItem artifacts
+
+    # ── 9. Upload artifact ────────────────────────────────────────────────────
+    - name: Upload php_pdo_sqlcipher DLL
+      uses: actions/upload-artifact@v4
+      with:
+        name: php_pdo_sqlcipher-php82-ts-x64-vs16
+        path: artifacts\
+        retention-days: 90
+
+    # ── 10. Debug info on failure ─────────────────────────────────────────────
+    - name: Show build logs on failure
+      if: failure()
+      run: |
+        Write-Host "=== configure log ==="
+        if (Test-Path "C:\php-src\configure.log") {
+          Get-Content "C:\php-src\configure.log" | Select-Object -Last 100
+        }
+        Write-Host "=== Directory listing ==="
+        Get-ChildItem "C:\php-src" | Select-Object Name, Mode
