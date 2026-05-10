@@ -175,11 +175,22 @@ jobs:
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
+        set LIB=C:\deps\lib;%LIB%
         set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
         cd /d C:\php-src
-        nmake php_pdo_sqlite
+
+        rem Check what Makefile target is available for pdo_sqlite
+        echo Searching Makefile for pdo_sqlite targets:
+        findstr /i "pdo_sqlite" Makefile 2>nul | findstr /i "target\|BUILD\|^php" | head /c 10
+        findstr /i "^php_pdo" Makefile 2>nul
+
+        rem Build everything configured (--disable-all means only php core + pdo + pdo_sqlite)
+        nmake
         if errorlevel 1 exit /b 1
         echo BUILD SUCCEEDED
+
+        echo Output DLLs:
+        dir x64\Release_TS\*.dll 2>nul || dir Release_TS\*.dll 2>nul
 
     # ── Collect artifacts ─────────────────────────────────────────────────────
     - name: Collect artifacts
