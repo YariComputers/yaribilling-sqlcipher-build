@@ -20,23 +20,17 @@ jobs:
         run: |
           git clone --depth 1 --branch "${{ github.event.inputs.sqlcipher_tag }}" \
             https://github.com/sqlcipher/sqlcipher.git sqlcipher
-          echo "SQLCipher cloned"
 
       - name: Generate SQLCipher amalgamation
         run: |
           cd sqlcipher
-          # Tcl is pre-installed on ubuntu-latest
-          which tclsh
-          tclsh --version || true
-
-          # Build the amalgamation using the SQLite/SQLCipher Makefile
-          # The 'sqlite3.c' target generates the amalgamation
           ./configure --enable-tempstore=yes \
             CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2" \
             --with-crypto-lib=none 2>&1 | tail -5
-
           make sqlite3.c
           ls -lh sqlite3.c sqlite3.h
+          # sqlite3ext.h comes from the source tree
+          cp src/sqlite3ext.h ./sqlite3ext.h
 
       - name: Upload amalgamation
         uses: actions/upload-artifact@v4
@@ -45,10 +39,11 @@ jobs:
           path: |
             sqlcipher/sqlite3.c
             sqlcipher/sqlite3.h
+            sqlcipher/sqlite3ext.h
           retention-days: 1
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Job 2: Build PHP extension on Windows using the amalgamation
+  # Job 2: Build PHP extension on Windows
   # ─────────────────────────────────────────────────────────────────────────────
   build-dll:
     runs-on: windows-latest
@@ -65,23 +60,21 @@ jobs:
       with:
         arch: x64
 
+    # ── bison + re2c (required by configure.bat) ──────────────────────────────
+    - name: Install bison and re2c
+      run: |
+        choco install winflexbison3 re2c -y --no-progress
+        $bin = "C:\ProgramData\chocolatey\bin"
+        Copy-Item "$bin\win_bison.exe" "$bin\bison.exe" -Force
+        Copy-Item "$bin\win_flex.exe"  "$bin\flex.exe"  -Force
+        Write-Host "bison: $(& bison --version | Select-Object -First 1)"
+        Write-Host "re2c:  $(& re2c --version)"
+
     # ── PHP SDK ───────────────────────────────────────────────────────────────
     - name: Clone PHP SDK binary tools
       run: |
         git clone --depth 1 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
         echo "C:\php-sdk\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-        Write-Host "PHP SDK ready"
-
-    # ── bison + re2c (required by configure.bat) ──────────────────────────────
-    - name: Install bison and re2c
-      run: |
-        choco install winflexbison3 re2c -y --no-progress
-        # PHP configure expects 'bison.exe' not 'win_bison.exe'
-        $bin = "C:\ProgramData\chocolatey\bin"
-        Copy-Item "$bin\win_bison.exe" "$bin\bison.exe" -Force
-        Copy-Item "$bin\win_flex.exe"  "$bin\flex.exe"  -Force
-        Write-Host "bison: $(bison --version | Select-Object -First 1)"
-        Write-Host "re2c:  $(re2c --version)"
 
     # ── OpenSSL from PHP Windows deps ─────────────────────────────────────────
     - name: Download OpenSSL deps
@@ -89,15 +82,14 @@ jobs:
         $url = "https://windows.php.net/downloads/php-sdk/deps/vs16/x64/openssl-3.0.15.pl1-vs16-x64.zip"
         Invoke-WebRequest $url -OutFile C:\openssl-deps.zip -UseBasicParsing
         Expand-Archive C:\openssl-deps.zip -DestinationPath C:\openssl-deps -Force
-        Write-Host "OpenSSL ready at C:\openssl-deps"
-        dir C:\openssl-deps\lib
+        Write-Host "OpenSSL lib contents:"
+        Get-ChildItem C:\openssl-deps\lib | Select-Object Name
 
     # ── PHP source ────────────────────────────────────────────────────────────
     - name: Clone PHP ${{ env.PHP_VERSION }} source
       run: |
         git clone --depth 1 --branch php-$env:PHP_VERSION `
           https://github.com/php/php-src.git C:\php-src
-        Write-Host "PHP source ready at C:\php-src"
 
     # ── Download SQLCipher amalgamation from Job 1 ────────────────────────────
     - name: Download SQLCipher amalgamation
@@ -106,48 +98,44 @@ jobs:
         name: sqlcipher-amalgamation
         path: C:\sqlcipher-amal
 
-    - name: Verify amalgamation
-      run: |
-        dir C:\sqlcipher-amal
-        Write-Host "sqlite3.c size: $((Get-Item C:\sqlcipher-amal\sqlite3.c).Length) bytes"
-
-    # ── Replace SQLite with SQLCipher amalgamation ────────────────────────────
-    - name: Integrate SQLCipher into PHP source
-      run: |
-        Write-Host "=== Finding sqlite3.c in PHP source ==="
-        Get-ChildItem C:\php-src -Recurse -Filter "sqlite3.c" | Select-Object FullName
-
-        # PHP 8.x keeps SQLite amalgamation directly in ext/sqlite3/
-        $dest = "C:\php-src\ext\sqlite3"
-        Copy-Item C:\sqlcipher-amal\sqlite3.c "$dest\sqlite3.c" -Force
-        Copy-Item C:\sqlcipher-amal\sqlite3.h "$dest\sqlite3.h" -Force
-        Write-Host "Replaced sqlite3.c in $dest"
-
-        # Also check libsqlite subdirectory (some PHP builds use it)
-        $libsqlite = "$dest\libsqlite"
-        if (Test-Path $libsqlite) {
-            Copy-Item C:\sqlcipher-amal\sqlite3.c "$libsqlite\sqlite3.c" -Force
-            Copy-Item C:\sqlcipher-amal\sqlite3.h "$libsqlite\sqlite3.h" -Force
-            Write-Host "Also replaced in $libsqlite"
-        }
-
-    # ── Set MSVC environment for SQLCipher + OpenSSL ─────────────────────────
-    - name: Set build environment variables
+    # ── Compile SQLCipher amalgamation into a static library ──────────────────
+    # PHP's SETUP_SQLITE3() looks for libsqlite3_a.lib — not source files
+    - name: Build SQLCipher static library (libsqlite3_a.lib)
       shell: cmd
       run: |
-        rem Persist env vars to GITHUB_ENV so subsequent steps inherit them
-        echo INCLUDE=C:\openssl-deps\include;%INCLUDE%>> %GITHUB_ENV%
-        echo LIB=C:\openssl-deps\lib;%LIB%>> %GITHUB_ENV%
-        echo CL=/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE>> %GITHUB_ENV%
-        echo LINK=/DEFAULTLIB:libcrypto.lib>> %GITHUB_ENV%
-        echo Done
+        md C:\sqlcipher-libs\include
+        md C:\sqlcipher-libs\lib
+
+        copy C:\sqlcipher-amal\sqlite3.h    C:\sqlcipher-libs\include\
+        copy C:\sqlcipher-amal\sqlite3ext.h C:\sqlcipher-libs\include\
+        dir C:\sqlcipher-amal
+
+        echo Compiling SQLCipher amalgamation...
+        cl /c /MD /O2 /nologo ^
+          /DSQLITE_HAS_CODEC ^
+          /DSQLITE_TEMP_STORE=2 ^
+          /DSQLCIPHER_CRYPTO_OPENSSL ^
+          /DSQLITE_ENABLE_COLUMN_METADATA ^
+          /DSQLITE_ENABLE_FTS3 ^
+          /DSQLITE_ENABLE_RTREE ^
+          /DSQLITE_OMIT_LOAD_EXTENSION ^
+          /I"C:\openssl-deps\include" ^
+          /Fo"C:\sqlcipher-libs\sqlite3.obj" ^
+          C:\sqlcipher-amal\sqlite3.c
+        if errorlevel 1 (echo COMPILE FAILED & exit /b 1)
+
+        echo Building static library...
+        lib /nologo /OUT:C:\sqlcipher-libs\lib\libsqlite3_a.lib C:\sqlcipher-libs\sqlite3.obj
+        if errorlevel 1 (echo LIB FAILED & exit /b 1)
+
+        echo Done:
+        dir C:\sqlcipher-libs\lib
 
     # ── buildconf ────────────────────────────────────────────────────────────
     - name: Run buildconf
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
-        where bison && where re2c && where cl && where perl
         cd /d C:\php-src
         call buildconf.bat --force
         if errorlevel 1 exit /b 1
@@ -157,19 +145,23 @@ jobs:
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
-        echo CL=%CL%
-        echo INCLUDE=%INCLUDE%
-        echo LIB=%LIB%
+        rem Add SQLCipher and OpenSSL headers to INCLUDE path
+        set INCLUDE=C:\sqlcipher-libs\include;C:\openssl-deps\include;%INCLUDE%
+        rem Add OpenSSL lib for linking
+        set LIB=C:\openssl-deps\lib;%LIB%
+        rem Extra linker libs needed by OpenSSL/SQLCipher
+        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
+
         cd /d C:\php-src
         call configure.bat ^
           --disable-all ^
           --enable-cli ^
-          --enable-pdo=shared ^
-          --enable-sqlite3=shared ^
-          --with-pdo-sqlite=shared
+          --enable-pdo ^
+          --with-sqlite3=C:\sqlcipher-libs ^
+          --with-pdo-sqlite=C:\sqlcipher-libs
         if errorlevel 1 (
-          echo configure FAILED - last 50 lines of configure.log:
-          powershell -Command "Get-Content configure.log | Select-Object -Last 50"
+          echo configure FAILED - last 40 lines of configure.log:
+          powershell -Command "if (Test-Path configure.log) { Get-Content configure.log | Select-Object -Last 40 }"
           exit /b 1
         )
 
@@ -179,7 +171,7 @@ jobs:
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
         cd /d C:\php-src
-        nmake php_sqlite3 php_pdo_sqlite
+        nmake php_pdo_sqlite
         if errorlevel 1 exit /b 1
         echo BUILD SUCCEEDED
 
@@ -202,14 +194,12 @@ jobs:
             Copy-Item "$dir\php_pdo_sqlite.dll" "artifacts\php_pdo_sqlcipher.dll"
             Write-Host "Collected: $dir\php_pdo_sqlite.dll"
             $found = $true
-          }
-          if (Test-Path "$dir\php_sqlite3.dll") {
-            Copy-Item "$dir\php_sqlite3.dll" "artifacts\php_sqlite3.dll"
+            break
           }
         }
 
         if (-not $found) {
-          Write-Host "DLL not found — full search:"
+          Write-Host "DLL not found — searching:"
           Get-ChildItem C:\php-src -Recurse -Filter "*.dll" | Select-Object FullName
           exit 1
         }
@@ -227,20 +217,12 @@ jobs:
       if: failure()
       shell: powershell
       run: |
-        Write-Host "===== configure.log (last 100 lines) ====="
+        Write-Host "===== configure.log (last 60 lines) ====="
         if (Test-Path C:\php-src\configure.log) {
-          Get-Content C:\php-src\configure.log | Select-Object -Last 100
-        } else {
-          Write-Host "No configure.log found"
-        }
-        Write-Host "===== ext/sqlite3 ====="
-        if (Test-Path C:\php-src\ext\sqlite3) {
-          Get-ChildItem C:\php-src\ext\sqlite3 | Select-Object Name, Length
-        }
-        Write-Host "===== buildconf output (last 30 lines) ====="
-        if (Test-Path C:\php-src\buildconf.log) {
-          Get-Content C:\php-src\buildconf.log | Select-Object -Last 30
-        }
+          Get-Content C:\php-src\configure.log | Select-Object -Last 60
+        } else { Write-Host "No configure.log" }
+        Write-Host "===== sqlcipher-libs ====="
+        Get-ChildItem C:\sqlcipher-libs -Recurse | Select-Object FullName, Length
         Write-Host "===== Release_TS ====="
         Get-ChildItem "C:\php-src\Release_TS" -ErrorAction SilentlyContinue | Select-Object Name
         Get-ChildItem "C:\php-src\x64\Release_TS" -ErrorAction SilentlyContinue | Select-Object Name
