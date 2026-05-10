@@ -54,12 +54,36 @@ jobs:
 
     steps:
 
-    # ── MSVC x64 ─────────────────────────────────────────────────────────────
-    - name: Setup MSVC x64
+    # ── Ensure MSVC v142 (14.29) toolset is available in VS 2022 ─────────────
+    - name: Ensure MSVC v142 toolset
+      run: |
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+          -latest -property installationPath
+        Write-Host "VS path: $vsPath"
+        $v142 = Get-ChildItem "$vsPath\VC\Tools\MSVC" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "14.29*" }
+        if ($v142) {
+          Write-Host "v142 already present: $($v142.FullName)"
+        } else {
+          Write-Host "Installing v142 toolset via VS Installer..."
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          & $installer modify --installPath $vsPath `
+            --add Microsoft.VisualStudio.Component.VC.14.29.16.11.x86.x64 `
+            --quiet --norestart 2>&1
+          Write-Host "Done"
+        }
+
+    - name: Setup MSVC x64 (v142 / 14.29)
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
         toolset: 14.29
+
+    - name: Verify compiler version is 14.29.x
+      shell: cmd
+      run: |
+        cl 2>&1 | findstr /i "version"
+        link 2>&1 | findstr /i "version"
 
     # ── bison + re2c (required by configure.bat) ──────────────────────────────
     - name: Install bison and re2c
