@@ -14,16 +14,15 @@ env:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
 
     steps:
 
     # ── 1. Setup MSVC 2019 x64 ────────────────────────────────────────────────
-    - name: Setup MSVC 2019 x64
+    - name: Setup MSVC x64
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-        vsversion: '2019'
 
     # ── 2. PHP SDK binary tools ───────────────────────────────────────────────
     - name: Clone PHP SDK binary tools
