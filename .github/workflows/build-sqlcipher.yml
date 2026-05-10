@@ -168,8 +168,7 @@ jobs:
           powershell -Command "if (Test-Path configure.log) { Get-Content configure.log | Select-Object -Last 60 }"
           exit /b 1
         )
-        echo configure.log tail:
-        powershell -Command "Get-Content configure.log | Select-Object -Last 20"
+        echo configure SUCCEEDED - pdo_sqlite should be enabled as shared
 
     # ── nmake ─────────────────────────────────────────────────────────────────
     - name: Run nmake
