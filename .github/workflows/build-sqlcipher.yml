@@ -72,6 +72,17 @@ jobs:
         echo "C:\php-sdk\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
         Write-Host "PHP SDK ready"
 
+    # ── bison + re2c (required by configure.bat) ──────────────────────────────
+    - name: Install bison and re2c
+      run: |
+        choco install winflexbison3 re2c -y --no-progress
+        # PHP configure expects 'bison.exe' not 'win_bison.exe'
+        $bin = "C:\ProgramData\chocolatey\bin"
+        Copy-Item "$bin\win_bison.exe" "$bin\bison.exe" -Force
+        Copy-Item "$bin\win_flex.exe"  "$bin\flex.exe"  -Force
+        Write-Host "bison: $(bison --version | Select-Object -First 1)"
+        Write-Host "re2c:  $(re2c --version)"
+
     # ── OpenSSL from PHP Windows deps ─────────────────────────────────────────
     - name: Download OpenSSL deps
       run: |
@@ -120,48 +131,56 @@ jobs:
             Write-Host "Also replaced in $libsqlite"
         }
 
-    # ── Configure and build ───────────────────────────────────────────────────
-    - name: Configure and build php_pdo_sqlite
+    # ── Set MSVC environment for SQLCipher + OpenSSL ─────────────────────────
+    - name: Set build environment variables
       shell: cmd
       run: |
-        rem ── Verify required tools ──
-        echo Checking tools...
+        rem Persist env vars to GITHUB_ENV so subsequent steps inherit them
+        echo INCLUDE=C:\openssl-deps\include;%INCLUDE%>> %GITHUB_ENV%
+        echo LIB=C:\openssl-deps\lib;%LIB%>> %GITHUB_ENV%
+        echo CL=/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE>> %GITHUB_ENV%
+        echo LINK=/DEFAULTLIB:libcrypto.lib>> %GITHUB_ENV%
+        echo Done
+
+    # ── buildconf ────────────────────────────────────────────────────────────
+    - name: Run buildconf
+      shell: cmd
+      run: |
         set PATH=C:\php-sdk\bin;%PATH%
-        where bison 2>nul && echo bison: OK || echo ERROR: bison missing
-        where re2c  2>nul && echo re2c: OK  || echo ERROR: re2c missing
-        where cl    2>nul && echo cl: OK    || echo ERROR: cl missing
-        where perl  2>nul && echo perl: OK  || echo WARNING: perl not found
+        where bison && where re2c && where cl && where perl
+        cd /d C:\php-src
+        call buildconf.bat --force
+        if errorlevel 1 exit /b 1
 
-        rem ── Set OpenSSL via standard MSVC environment variables ──
-        rem   CL   = extra flags passed to cl.exe for every compile
-        rem   LINK = extra flags passed to link.exe for every link
-        rem   INCLUDE / LIB = search paths
-        set INCLUDE=C:\openssl-deps\include;%INCLUDE%
-        set LIB=C:\openssl-deps\lib;%LIB%
-        set CL=/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE
-        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:user32.lib /DEFAULTLIB:gdi32.lib /DEFAULTLIB:advapi32.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
-
+    # ── configure ────────────────────────────────────────────────────────────
+    - name: Run configure
+      shell: cmd
+      run: |
+        set PATH=C:\php-sdk\bin;%PATH%
+        echo CL=%CL%
         echo INCLUDE=%INCLUDE%
         echo LIB=%LIB%
-
         cd /d C:\php-src
-
-        echo ── buildconf ──
-        call buildconf.bat --force
-        if errorlevel 1 (echo buildconf FAILED & exit /b 1)
-
-        echo ── configure ──
         call configure.bat ^
           --disable-all ^
           --enable-cli ^
+          --enable-pdo=shared ^
           --enable-sqlite3=shared ^
           --with-pdo-sqlite=shared
-        if errorlevel 1 (echo configure FAILED & exit /b 1)
+        if errorlevel 1 (
+          echo configure FAILED - last 50 lines of configure.log:
+          powershell -Command "Get-Content configure.log | Select-Object -Last 50"
+          exit /b 1
+        )
 
-        echo ── nmake ──
+    # ── nmake ─────────────────────────────────────────────────────────────────
+    - name: Run nmake
+      shell: cmd
+      run: |
+        set PATH=C:\php-sdk\bin;%PATH%
+        cd /d C:\php-src
         nmake php_sqlite3 php_pdo_sqlite
-        if errorlevel 1 (echo nmake FAILED & exit /b 1)
-
+        if errorlevel 1 exit /b 1
         echo BUILD SUCCEEDED
 
     # ── Collect artifacts ─────────────────────────────────────────────────────
