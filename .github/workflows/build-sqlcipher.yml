@@ -153,9 +153,6 @@ jobs:
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
-        rem libcrypto.lib is in C:\deps\lib (auto-found), but must be listed as default lib
-        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
-
         cd /d C:\php-src
         echo Configure will auto-discover C:\deps as PHP_PHP_BUILD...
         call configure.bat ^
@@ -176,7 +173,8 @@ jobs:
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
         set LIB=C:\deps\lib;%LIB%
-        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
+        rem _LINK_ is appended by link.exe as extra options - safe unlike LINK which conflicts with nmake $(LINK) macro
+        set _LINK_=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
         cd /d C:\php-src
 
         rem Check what Makefile target is available for pdo_sqlite
