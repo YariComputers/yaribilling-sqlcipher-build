@@ -124,28 +124,41 @@ jobs:
     - name: Configure and build php_pdo_sqlite
       shell: cmd
       run: |
-        rem OpenSSL from PHP deps (clean structure)
-        set OSSL=C:\openssl-deps
-        set OSSL_LIB=C:\openssl-deps\lib
-        set OSSL_LIBNAME=libcrypto.lib
-        echo OpenSSL include: %OSSL%\include
-        echo OpenSSL lib: %OSSL_LIB%\%OSSL_LIBNAME%
+        rem ── Verify required tools ──
+        echo Checking tools...
+        set PATH=C:\php-sdk\bin;%PATH%
+        where bison 2>nul && echo bison: OK || echo ERROR: bison missing
+        where re2c  2>nul && echo re2c: OK  || echo ERROR: re2c missing
+        where cl    2>nul && echo cl: OK    || echo ERROR: cl missing
+        where perl  2>nul && echo perl: OK  || echo WARNING: perl not found
+
+        rem ── Set OpenSSL via standard MSVC environment variables ──
+        rem   CL   = extra flags passed to cl.exe for every compile
+        rem   LINK = extra flags passed to link.exe for every link
+        rem   INCLUDE / LIB = search paths
+        set INCLUDE=C:\openssl-deps\include;%INCLUDE%
+        set LIB=C:\openssl-deps\lib;%LIB%
+        set CL=/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE
+        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:user32.lib /DEFAULTLIB:gdi32.lib /DEFAULTLIB:advapi32.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
+
+        echo INCLUDE=%INCLUDE%
+        echo LIB=%LIB%
 
         cd /d C:\php-src
 
+        echo ── buildconf ──
         call buildconf.bat --force
         if errorlevel 1 (echo buildconf FAILED & exit /b 1)
 
+        echo ── configure ──
         call configure.bat ^
           --disable-all ^
           --enable-cli ^
           --enable-sqlite3=shared ^
-          --with-pdo-sqlite=shared ^
-          CFLAGS="/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE /I\"%OSSL%\include\"" ^
-          LDFLAGS="/LIBPATH:\"%OSSL_LIB%\"" ^
-          LIBS="%OSSL_LIBNAME% user32.lib gdi32.lib advapi32.lib crypt32.lib ws2_32.lib"
+          --with-pdo-sqlite=shared
         if errorlevel 1 (echo configure FAILED & exit /b 1)
 
+        echo ── nmake ──
         nmake php_sqlite3 php_pdo_sqlite
         if errorlevel 1 (echo nmake FAILED & exit /b 1)
 
@@ -193,12 +206,22 @@ jobs:
     # ── Debug on failure ──────────────────────────────────────────────────────
     - name: Show logs on failure
       if: failure()
-      shell: cmd
+      shell: powershell
       run: |
-        echo ===== configure.log (last 80 lines) =====
-        powershell -Command "if (Test-Path C:\php-src\configure.log) { Get-Content C:\php-src\configure.log | Select-Object -Last 80 }"
-        echo ===== ext/sqlite3 =====
-        dir C:\php-src\ext\sqlite3 /b 2>nul
-        echo ===== Release_TS =====
-        dir C:\php-src\Release_TS 2>nul || echo No Release_TS
-        dir "C:\php-src\x64\Release_TS" 2>nul || echo No x64\Release_TS
+        Write-Host "===== configure.log (last 100 lines) ====="
+        if (Test-Path C:\php-src\configure.log) {
+          Get-Content C:\php-src\configure.log | Select-Object -Last 100
+        } else {
+          Write-Host "No configure.log found"
+        }
+        Write-Host "===== ext/sqlite3 ====="
+        if (Test-Path C:\php-src\ext\sqlite3) {
+          Get-ChildItem C:\php-src\ext\sqlite3 | Select-Object Name, Length
+        }
+        Write-Host "===== buildconf output (last 30 lines) ====="
+        if (Test-Path C:\php-src\buildconf.log) {
+          Get-Content C:\php-src\buildconf.log | Select-Object -Last 30
+        }
+        Write-Host "===== Release_TS ====="
+        Get-ChildItem "C:\php-src\Release_TS" -ErrorAction SilentlyContinue | Select-Object Name
+        Get-ChildItem "C:\php-src\x64\Release_TS" -ErrorAction SilentlyContinue | Select-Object Name
