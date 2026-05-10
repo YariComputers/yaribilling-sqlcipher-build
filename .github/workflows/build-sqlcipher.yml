@@ -9,114 +9,128 @@ on:
         required: true
 
 jobs:
-  build:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Generate SQLCipher amalgamation on Ubuntu (Tcl is pre-installed)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-amalgamation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone SQLCipher ${{ github.event.inputs.sqlcipher_tag }}
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.sqlcipher_tag }}" \
+            https://github.com/sqlcipher/sqlcipher.git sqlcipher
+          echo "SQLCipher cloned"
+
+      - name: Generate SQLCipher amalgamation
+        run: |
+          cd sqlcipher
+          # Tcl is pre-installed on ubuntu-latest
+          which tclsh
+          tclsh --version || true
+
+          # Build the amalgamation using the SQLite/SQLCipher Makefile
+          # The 'sqlite3.c' target generates the amalgamation
+          ./configure --enable-tempstore=yes \
+            CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2" \
+            --with-crypto-lib=none 2>&1 | tail -5
+
+          make sqlite3.c
+          ls -lh sqlite3.c sqlite3.h
+
+      - name: Upload amalgamation
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlcipher-amalgamation
+          path: |
+            sqlcipher/sqlite3.c
+            sqlcipher/sqlite3.h
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Build PHP extension on Windows using the amalgamation
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-dll:
     runs-on: windows-latest
+    needs: build-amalgamation
 
     env:
       PHP_VERSION: '8.2.12'
 
     steps:
 
-    # ── 1. MSVC x64 ──────────────────────────────────────────────────────────
+    # ── MSVC x64 ─────────────────────────────────────────────────────────────
     - name: Setup MSVC x64
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
 
-    # ── 2. PHP SDK (provides bison, flex, re2c needed by buildconf) ───────────
+    # ── PHP SDK ───────────────────────────────────────────────────────────────
     - name: Clone PHP SDK binary tools
       run: |
         git clone --depth 1 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
         echo "C:\php-sdk\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
         Write-Host "PHP SDK ready"
 
-    # ── 3. OpenSSL ────────────────────────────────────────────────────────────
-    - name: Install OpenSSL x64
+    # ── OpenSSL from PHP Windows deps ─────────────────────────────────────────
+    - name: Download OpenSSL deps
       run: |
-        choco install openssl --no-progress -y
-        Write-Host "OpenSSL done"
+        $url = "https://windows.php.net/downloads/php-sdk/deps/vs16/x64/openssl-3.0.15.pl1-vs16-x64.zip"
+        Invoke-WebRequest $url -OutFile C:\openssl-deps.zip -UseBasicParsing
+        Expand-Archive C:\openssl-deps.zip -DestinationPath C:\openssl-deps -Force
+        Write-Host "OpenSSL ready at C:\openssl-deps"
+        dir C:\openssl-deps\lib
 
-    # ── 4. PHP source ─────────────────────────────────────────────────────────
-    - name: Download PHP ${{ env.PHP_VERSION }} source
+    # ── PHP source ────────────────────────────────────────────────────────────
+    - name: Clone PHP ${{ env.PHP_VERSION }} source
       run: |
-        $url = "https://github.com/php/php-src/archive/refs/tags/php-$env:PHP_VERSION.zip"
-        Write-Host "Downloading: $url"
-        Invoke-WebRequest $url -OutFile C:\php-src.zip -UseBasicParsing
-        Expand-Archive C:\php-src.zip -DestinationPath C:\php-src-raw
-        $dir = Get-ChildItem C:\php-src-raw | Select-Object -First 1
-        Move-Item $dir.FullName C:\php-src
+        git clone --depth 1 --branch php-$env:PHP_VERSION `
+          https://github.com/php/php-src.git C:\php-src
         Write-Host "PHP source ready at C:\php-src"
 
-    # ── 5. SQLCipher ──────────────────────────────────────────────────────────
-    - name: Clone SQLCipher ${{ github.event.inputs.sqlcipher_tag }}
-      run: |
-        git clone --depth 1 --branch "${{ github.event.inputs.sqlcipher_tag }}" `
-          https://github.com/sqlcipher/sqlcipher.git C:\sqlcipher
-        Write-Host "SQLCipher ready"
+    # ── Download SQLCipher amalgamation from Job 1 ────────────────────────────
+    - name: Download SQLCipher amalgamation
+      uses: actions/download-artifact@v4
+      with:
+        name: sqlcipher-amalgamation
+        path: C:\sqlcipher-amal
 
-    # ── 6. Find SQLite location in PHP source and replace with SQLCipher ──────
+    - name: Verify amalgamation
+      run: |
+        dir C:\sqlcipher-amal
+        Write-Host "sqlite3.c size: $((Get-Item C:\sqlcipher-amal\sqlite3.c).Length) bytes"
+
+    # ── Replace SQLite with SQLCipher amalgamation ────────────────────────────
     - name: Integrate SQLCipher into PHP source
       run: |
-        Write-Host "=== Searching for sqlite3.c in PHP source ==="
-        $hits = Get-ChildItem C:\php-src -Recurse -Filter "sqlite3.c" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-        Write-Host "Found: $hits"
+        Write-Host "=== Finding sqlite3.c in PHP source ==="
+        Get-ChildItem C:\php-src -Recurse -Filter "sqlite3.c" | Select-Object FullName
 
-        # Primary location: ext/sqlite3/libsqlite/ (PHP 8.x standard)
-        $libsqlite = "C:\php-src\ext\sqlite3\libsqlite"
+        # PHP 8.x keeps SQLite amalgamation directly in ext/sqlite3/
+        $dest = "C:\php-src\ext\sqlite3"
+        Copy-Item C:\sqlcipher-amal\sqlite3.c "$dest\sqlite3.c" -Force
+        Copy-Item C:\sqlcipher-amal\sqlite3.h "$dest\sqlite3.h" -Force
+        Write-Host "Replaced sqlite3.c in $dest"
+
+        # Also check libsqlite subdirectory (some PHP builds use it)
+        $libsqlite = "$dest\libsqlite"
         if (Test-Path $libsqlite) {
-            Copy-Item C:\sqlcipher\sqlite3.c "$libsqlite\sqlite3.c" -Force
-            Copy-Item C:\sqlcipher\sqlite3.h "$libsqlite\sqlite3.h" -Force
-            Write-Host "Replaced in $libsqlite"
-        } else {
-            Write-Host "WARNING: $libsqlite not found"
+            Copy-Item C:\sqlcipher-amal\sqlite3.c "$libsqlite\sqlite3.c" -Force
+            Copy-Item C:\sqlcipher-amal\sqlite3.h "$libsqlite\sqlite3.h" -Force
+            Write-Host "Also replaced in $libsqlite"
         }
 
-        # Also copy to ext/pdo_sqlite/ in case configure uses it directly
-        $pdoSqlite = "C:\php-src\ext\pdo_sqlite"
-        if (Test-Path $pdoSqlite) {
-            Copy-Item C:\sqlcipher\sqlite3.c "$pdoSqlite\sqlite3.c" -Force
-            Copy-Item C:\sqlcipher\sqlite3.h "$pdoSqlite\sqlite3.h" -Force
-            Write-Host "Replaced in $pdoSqlite"
-        }
-
-        Write-Host "SQLCipher integration done"
-
-    # ── 7. Configure and build ────────────────────────────────────────────────
+    # ── Configure and build ───────────────────────────────────────────────────
     - name: Configure and build php_pdo_sqlite
       shell: cmd
       run: |
-        rem ── Detect OpenSSL install path ──
-        set OSSL=C:\Program Files\OpenSSL-Win64
-        if not exist "%OSSL%" set OSSL=C:\OpenSSL-Win64
-        if not exist "%OSSL%" set OSSL=C:\Program Files\OpenSSL
-        if not exist "%OSSL%" (
-          echo ERROR: OpenSSL not found. Listing C:\ top-level:
-          dir C:\ /b
-          exit /b 1
-        )
-        echo OpenSSL at: %OSSL%
+        rem OpenSSL from PHP deps (clean structure)
+        set OSSL=C:\openssl-deps
+        set OSSL_LIB=C:\openssl-deps\lib
+        set OSSL_LIBNAME=libcrypto.lib
+        echo OpenSSL include: %OSSL%\include
+        echo OpenSSL lib: %OSSL_LIB%\%OSSL_LIBNAME%
 
-        rem ── Find correct OpenSSL lib path ──
-        if exist "%OSSL%\lib\VC\x64\MT\libcrypto.lib" (
-          set OSSL_LIB=%OSSL%\lib\VC\x64\MT
-          set OSSL_LIBNAME=libcrypto.lib
-        ) else if exist "%OSSL%\lib\VC\x64\MD\libcrypto.lib" (
-          set OSSL_LIB=%OSSL%\lib\VC\x64\MD
-          set OSSL_LIBNAME=libcrypto.lib
-        ) else if exist "%OSSL%\lib\VC\libcrypto64MD.lib" (
-          set OSSL_LIB=%OSSL%\lib\VC
-          set OSSL_LIBNAME=libcrypto64MD.lib
-        ) else if exist "%OSSL%\lib\libcrypto.lib" (
-          set OSSL_LIB=%OSSL%\lib
-          set OSSL_LIBNAME=libcrypto.lib
-        ) else (
-          echo ERROR: libcrypto not found. Listing lib tree:
-          dir "%OSSL%\lib" /s /b *.lib 2>nul
-          exit /b 1
-        )
-        echo Using lib: %OSSL_LIB%\%OSSL_LIBNAME%
-
-        rem ── Build ──
         cd /d C:\php-src
 
         call buildconf.bat --force
@@ -137,17 +151,12 @@ jobs:
 
         echo BUILD SUCCEEDED
 
-    # ── 8. Collect artifacts ──────────────────────────────────────────────────
+    # ── Collect artifacts ─────────────────────────────────────────────────────
     - name: Collect artifacts
       run: |
         New-Item -ItemType Directory -Path artifacts -Force | Out-Null
 
-        $releaseDirs = @(
-          "C:\php-src\Release_TS",
-          "C:\php-src\x64\Release_TS"
-        )
-
-        Write-Host "=== Searching for output DLLs ==="
+        $releaseDirs = @("C:\php-src\Release_TS","C:\php-src\x64\Release_TS")
         foreach ($dir in $releaseDirs) {
           if (Test-Path $dir) {
             Write-Host "Contents of $dir :"
@@ -157,26 +166,23 @@ jobs:
 
         $found = $false
         foreach ($dir in $releaseDirs) {
-          $dll = "$dir\php_pdo_sqlite.dll"
-          if (Test-Path $dll) {
-            Copy-Item $dll "artifacts\php_pdo_sqlcipher.dll"
-            Write-Host "Collected pdo_sqlite: $dll"
+          if (Test-Path "$dir\php_pdo_sqlite.dll") {
+            Copy-Item "$dir\php_pdo_sqlite.dll" "artifacts\php_pdo_sqlcipher.dll"
+            Write-Host "Collected: $dir\php_pdo_sqlite.dll"
             $found = $true
           }
-          $dll2 = "$dir\php_sqlite3.dll"
-          if (Test-Path $dll2) {
-            Copy-Item $dll2 "artifacts\php_sqlite3.dll"
-            Write-Host "Collected sqlite3: $dll2"
+          if (Test-Path "$dir\php_sqlite3.dll") {
+            Copy-Item "$dir\php_sqlite3.dll" "artifacts\php_sqlite3.dll"
           }
         }
 
         if (-not $found) {
           Write-Host "DLL not found — full search:"
-          Get-ChildItem C:\php-src -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
+          Get-ChildItem C:\php-src -Recurse -Filter "*.dll" | Select-Object FullName
           exit 1
         }
 
-    # ── 9. Upload ─────────────────────────────────────────────────────────────
+    # ── Upload ────────────────────────────────────────────────────────────────
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
@@ -184,17 +190,15 @@ jobs:
         path: artifacts\
         retention-days: 90
 
-    # ── 10. Debug on failure ──────────────────────────────────────────────────
+    # ── Debug on failure ──────────────────────────────────────────────────────
     - name: Show logs on failure
       if: failure()
       shell: cmd
       run: |
         echo ===== configure.log (last 80 lines) =====
-        powershell -Command "if (Test-Path C:\php-src\configure.log) { Get-Content C:\php-src\configure.log | Select-Object -Last 80 } else { 'No configure.log found' }"
-        echo ===== ext/sqlite3 structure =====
-        dir C:\php-src\ext\sqlite3 /s /b 2>nul
-        echo ===== ext/pdo_sqlite structure =====
-        dir C:\php-src\ext\pdo_sqlite /s /b 2>nul
-        echo ===== Release_TS contents =====
+        powershell -Command "if (Test-Path C:\php-src\configure.log) { Get-Content C:\php-src\configure.log | Select-Object -Last 80 }"
+        echo ===== ext/sqlite3 =====
+        dir C:\php-src\ext\sqlite3 /b 2>nul
+        echo ===== Release_TS =====
         dir C:\php-src\Release_TS 2>nul || echo No Release_TS
         dir "C:\php-src\x64\Release_TS" 2>nul || echo No x64\Release_TS
