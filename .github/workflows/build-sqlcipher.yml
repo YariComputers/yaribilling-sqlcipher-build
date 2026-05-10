@@ -98,19 +98,28 @@ jobs:
         name: sqlcipher-amalgamation
         path: C:\sqlcipher-amal
 
-    # ── Compile SQLCipher amalgamation into a static library ──────────────────
-    # PHP's SETUP_SQLITE3() looks for libsqlite3_a.lib — not source files
-    - name: Build SQLCipher static library (libsqlite3_a.lib)
+    # ── Build SQLCipher static lib + setup C:\deps (auto-found by configure) ──
+    # configure.bat looks for "..\deps" relative to C:\php-src → finds C:\deps
+    # It adds C:\deps\lib to lib search path and C:\deps\include to CFLAGS
+    - name: Build SQLCipher static library and populate C:\deps
       shell: cmd
       run: |
-        md C:\sqlcipher-libs\include
-        md C:\sqlcipher-libs\lib
+        rem Create the deps tree that configure auto-discovers
+        md C:\deps\lib
+        md C:\deps\include
 
-        copy C:\sqlcipher-amal\sqlite3.h    C:\sqlcipher-libs\include\
-        copy C:\sqlcipher-amal\sqlite3ext.h C:\sqlcipher-libs\include\
-        dir C:\sqlcipher-amal
+        rem SQLCipher headers → C:\deps\include\
+        copy C:\sqlcipher-amal\sqlite3.h    C:\deps\include\
+        copy C:\sqlcipher-amal\sqlite3ext.h C:\deps\include\
 
-        echo Compiling SQLCipher amalgamation...
+        rem OpenSSL headers → C:\deps\include\openssl\
+        xcopy /E /I /Q C:\openssl-deps\include\openssl C:\deps\include\openssl
+
+        rem OpenSSL libs → C:\deps\lib\
+        copy C:\openssl-deps\lib\libcrypto.lib C:\deps\lib\
+        copy C:\openssl-deps\lib\libssl.lib    C:\deps\lib\
+
+        echo Compiling SQLCipher amalgamation (this takes ~2 min)...
         cl /c /MD /O2 /nologo ^
           /DSQLITE_HAS_CODEC ^
           /DSQLITE_TEMP_STORE=2 ^
@@ -119,17 +128,16 @@ jobs:
           /DSQLITE_ENABLE_FTS3 ^
           /DSQLITE_ENABLE_RTREE ^
           /DSQLITE_OMIT_LOAD_EXTENSION ^
-          /I"C:\openssl-deps\include" ^
-          /Fo"C:\sqlcipher-libs\sqlite3.obj" ^
+          /I"C:\deps\include" ^
+          /FoC:\deps\sqlite3.obj ^
           C:\sqlcipher-amal\sqlite3.c
         if errorlevel 1 (echo COMPILE FAILED & exit /b 1)
 
-        echo Building static library...
-        lib /nologo /OUT:C:\sqlcipher-libs\lib\libsqlite3_a.lib C:\sqlcipher-libs\sqlite3.obj
+        lib /nologo /OUT:C:\deps\lib\libsqlite3_a.lib C:\deps\sqlite3.obj
         if errorlevel 1 (echo LIB FAILED & exit /b 1)
 
-        echo Done:
-        dir C:\sqlcipher-libs\lib
+        echo C:\deps\lib contents:
+        dir C:\deps\lib
 
     # ── buildconf ────────────────────────────────────────────────────────────
     - name: Run buildconf
@@ -145,31 +153,30 @@ jobs:
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
-        rem Add SQLCipher and OpenSSL headers to INCLUDE path
-        set INCLUDE=C:\sqlcipher-libs\include;C:\openssl-deps\include;%INCLUDE%
-        rem Add OpenSSL lib for linking
-        set LIB=C:\openssl-deps\lib;%LIB%
-        rem Extra linker libs needed by OpenSSL/SQLCipher
+        rem libcrypto.lib is in C:\deps\lib (auto-found), but must be listed as default lib
         set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
 
         cd /d C:\php-src
+        echo Configure will auto-discover C:\deps as PHP_PHP_BUILD...
         call configure.bat ^
           --disable-all ^
           --enable-cli ^
           --enable-pdo ^
-          --with-sqlite3=C:\sqlcipher-libs ^
-          --with-pdo-sqlite=C:\sqlcipher-libs
+          --with-pdo-sqlite=shared
         if errorlevel 1 (
-          echo configure FAILED - last 40 lines of configure.log:
-          powershell -Command "if (Test-Path configure.log) { Get-Content configure.log | Select-Object -Last 40 }"
+          echo configure FAILED - configure.log:
+          powershell -Command "if (Test-Path configure.log) { Get-Content configure.log | Select-Object -Last 60 }"
           exit /b 1
         )
+        echo configure.log tail:
+        powershell -Command "Get-Content configure.log | Select-Object -Last 20"
 
     # ── nmake ─────────────────────────────────────────────────────────────────
     - name: Run nmake
       shell: cmd
       run: |
         set PATH=C:\php-sdk\bin;%PATH%
+        set LINK=/DEFAULTLIB:libcrypto.lib /DEFAULTLIB:crypt32.lib /DEFAULTLIB:ws2_32.lib
         cd /d C:\php-src
         nmake php_pdo_sqlite
         if errorlevel 1 exit /b 1
