@@ -10,19 +10,18 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
 
     env:
       PHP_VERSION: '8.2.12'
 
     steps:
 
-    # ── 1. MSVC 2019 x64 ─────────────────────────────────────────────────────
-    - name: Setup MSVC 2019 x64
+    # ── 1. MSVC x64 (VS2022 runner, v142 toolset targets VS2019 ABI for PHP 8.2) ──
+    - name: Setup MSVC x64
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-        vsversion: '2019'
 
     # ── 2. PHP SDK (provides bison, flex, re2c needed by buildconf) ───────────
     - name: Clone PHP SDK binary tools
@@ -105,7 +104,8 @@ jobs:
           --with-pdo-sqlite=shared ^
           CFLAGS="/DSQLITE_HAS_CODEC /DSQLITE_TEMP_STORE=2 /DSQLCIPHER_CRYPTO_OPENSSL /DSQLITE_ENABLE_COLUMN_METADATA /DSQLITE_ENABLE_FTS3 /DSQLITE_ENABLE_RTREE /I\"%OSSL%\include\"" ^
           LDFLAGS="/LIBPATH:\"%OSSL_LIB%\"" ^
-          LIBS="%OSSL_LIBNAME% user32.lib gdi32.lib advapi32.lib crypt32.lib ws2_32.lib"
+          LIBS="%OSSL_LIBNAME% user32.lib gdi32.lib advapi32.lib crypt32.lib ws2_32.lib" ^
+          PHP_BUILD_COMPILER=vs16
         if errorlevel 1 (echo configure FAILED & exit /b 1)
 
         nmake php_pdo_sqlite
