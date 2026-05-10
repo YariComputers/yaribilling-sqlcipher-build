@@ -42,11 +42,20 @@ jobs:
 
     # ── 4. PHP Windows dependencies (includes OpenSSL) ────────────────────────
     - name: Download PHP Windows dependencies
-      shell: cmd
       run: |
-        cd /d C:\php-sdk
-        phpsdk_deps.bat --update --branch PHP-8.2 --vs 16 --arch x64 --dest C:\php-deps
-        echo PHP deps downloaded.
+        # Download pre-built OpenSSL for Windows (used by PHP project)
+        $depsUrl = "https://windows.php.net/downloads/php-sdk/deps/vs16/x64/"
+        # Use choco for OpenSSL - faster and reliable on GitHub Actions
+        choco install openssl --version=3.1.1 -y --no-progress
+        Write-Host "OpenSSL installed."
+        # Also get the PHP dev pack for headers/libs
+        $devPackUrl = "https://windows.php.net/downloads/releases/php-devel-pack-8.2.12-Win32-vs16-x64.zip"
+        Write-Host "Downloading PHP dev pack..."
+        Invoke-WebRequest $devPackUrl -OutFile php-devpack.zip -UseBasicParsing
+        Expand-Archive php-devpack.zip -DestinationPath C:\php-devpack-raw
+        $extracted = Get-ChildItem C:\php-devpack-raw | Select-Object -First 1
+        Rename-Item $extracted.FullName C:\php-devpack
+        Write-Host "PHP dev pack ready."
 
     # ── 5. SQLCipher source ───────────────────────────────────────────────────
     - name: Clone SQLCipher
@@ -68,9 +77,8 @@ jobs:
     - name: Build php_pdo_sqlite against SQLCipher
       shell: cmd
       run: |
-        set DEPS=C:\php-deps
-        set OPENSSL_INC=%DEPS%\include
-        set OPENSSL_LIB=%DEPS%\lib
+        set OPENSSL_INC=C:\Program Files\OpenSSL-Win64\include
+        set OPENSSL_LIB=C:\Program Files\OpenSSL-Win64\lib\VC\x64\MT
 
         cd /d C:\php-src
 
